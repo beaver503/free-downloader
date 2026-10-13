@@ -3,7 +3,6 @@
 import json
 import os
 import re
-import tempfile
 from typing import Optional
 
 import httpx
@@ -19,7 +18,6 @@ class SubtitleExtractor:
     """从视频 URL 提取平台字幕（人工字幕 > 自动字幕）"""
 
     PREFERRED_LANGS = ["zh-Hans", "zh", "zh-CN", "en", "ja", "ko"]
-    SUBTITLE_FORMAT = "json3"
 
     def extract(self, url: str) -> dict:
         """
@@ -44,7 +42,7 @@ class SubtitleExtractor:
 
         manual_subs = {k: v for k, v in manual_subs.items() if k != "danmaku"}
 
-        lang, sub_url, sub_type = self._pick_best_subtitle(manual_subs, auto_subs)
+        lang, sub_url, sub_type, sub_ext = self._pick_best_subtitle(manual_subs, auto_subs)
         if not sub_url:
             return {
                 "has_subtitle": False,
@@ -54,7 +52,15 @@ class SubtitleExtractor:
                 "full_text": "",
             }
 
-        segments = self._download_and_parse(url, lang, sub_type)
+        segments = self._fetch_and_parse(sub_url, sub_ext)
+        if not segments:
+            return {
+                "has_subtitle": False,
+                "language": "",
+                "subtitle_type": "none",
+                "segments": [],
+                "full_text": "",
+            }
 
         full_text = " ".join(seg["text"] for seg in segments)
 
@@ -169,77 +175,87 @@ class SubtitleExtractor:
 
     def _pick_best_subtitle(
         self, manual_subs: dict, auto_subs: dict
-    ) -> tuple[str, Optional[str], str]:
-        """按优先级选择最佳字幕，返回 (lang, url, type)"""
+    ) -> tuple[str, Optional[str], str, str]:
+        """按优先级选择最佳字幕，返回 (lang, url, type, ext)"""
         for lang in self.PREFERRED_LANGS:
             if lang in manual_subs:
-                formats = manual_subs[lang]
-                url = self._get_format_url(formats)
+                url, ext = self._get_format_url(manual_subs[lang])
                 if url:
-                    return lang, url, "manual"
+                    return lang, url, "manual", ext
 
         for lang in self.PREFERRED_LANGS:
             if lang in auto_subs:
-                formats = auto_subs[lang]
-                url = self._get_format_url(formats)
+                url, ext = self._get_format_url(auto_subs[lang])
                 if url:
-                    return lang, url, "auto"
+                    return lang, url, "auto", ext
 
         if manual_subs:
             first_lang = next(iter(manual_subs))
-            url = self._get_format_url(manual_subs[first_lang])
+            url, ext = self._get_format_url(manual_subs[first_lang])
             if url:
-                return first_lang, url, "manual"
+                return first_lang, url, "manual", ext
 
         if auto_subs:
             first_lang = next(iter(auto_subs))
-            url = self._get_format_url(auto_subs[first_lang])
+            url, ext = self._get_format_url(auto_subs[first_lang])
             if url:
-                return first_lang, url, "auto"
+                return first_lang, url, "auto", ext
 
-        return "", None, "none"
+        return "", None, "none", ""
 
     @staticmethod
-    def _get_format_url(formats: list) -> Optional[str]:
-        preferred = ["json3", "srv3", "vtt", "ttml"]
+    def _get_format_url(formats: list) -> tuple[Optional[str], str]:
+        """按优先级挑选可直接请求的字幕格式，返回 (url, ext)"""
+        preferred = ["vtt", "json3", "srv3", "ttml"]
         for pref in preferred:
             for fmt in formats:
                 if fmt.get("ext") == pref:
-                    return fmt.get("url")
-        return formats[0].get("url") if formats else None
+                    return fmt.get("url"), pref
+        if formats:
+            return formats[0].get("url"), formats[0].get("ext", "")
+        return None, ""
 
-    def _download_and_parse(self, url: str, lang: str, sub_type: str) -> list[dict]:
-        """通过 yt-dlp 下载字幕文件并解析为分段列表"""
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            ydl_opts = {
-                "quiet": True,
-                "no_warnings": True,
-                "noplaylist": True,
-                "skip_download": True,
-                "writesubtitles": sub_type == "manual",
-                "writeautomaticsub": sub_type == "auto",
-                "subtitleslangs": [lang],
-                "subtitlesformat": "vtt",
-                "outtmpl": os.path.join(tmp_dir, "subtitle"),
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
+    def _fetch_and_parse(self, sub_url: str, sub_ext: str) -> list[dict]:
+        """直接请求已解析出的字幕 URL 并解析，避免对同一视频二次执行 yt-dlp 完整提取"""
+        resp = httpx.get(
+            sub_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            },
+            timeout=15,
+            follow_redirects=True,
+        )
+        resp.raise_for_status()
 
-            vtt_files = [
-                f for f in os.listdir(tmp_dir) if f.endswith(".vtt")
-            ]
-            if not vtt_files:
-                return []
-
-            vtt_path = os.path.join(tmp_dir, vtt_files[0])
-            return self._parse_vtt(vtt_path)
+        if sub_ext == "json3":
+            return self._parse_json3(resp.text)
+        return self._parse_vtt(resp.text)
 
     @staticmethod
-    def _parse_vtt(filepath: str) -> list[dict]:
-        """解析 VTT 字幕文件为结构化分段"""
-        with open(filepath, "r", encoding="utf-8") as f:
-            content = f.read()
+    def _parse_json3(content: str) -> list[dict]:
+        """解析 json3 字幕内容为结构化分段"""
+        data = json.loads(content)
+        segments = []
+        seen_texts = set()
+        for event in data.get("events", []):
+            segs = event.get("segs") or []
+            text = "".join(s.get("utf8", "") for s in segs).strip()
+            if not text or text in seen_texts:
+                continue
+            seen_texts.add(text)
 
+            start = event.get("tStartMs", 0) / 1000
+            duration = event.get("dDurationMs", 0) / 1000
+            segments.append({
+                "start": round(start, 2),
+                "end": round(start + duration, 2),
+                "text": text,
+            })
+        return segments
+
+    @staticmethod
+    def _parse_vtt(content: str) -> list[dict]:
+        """解析 VTT 字幕内容为结构化分段"""
         segments = []
         blocks = re.split(r"\n\n+", content)
         time_pattern = re.compile(
