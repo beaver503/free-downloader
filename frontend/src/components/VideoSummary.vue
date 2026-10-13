@@ -41,15 +41,6 @@
               <span class="w-1.5 h-1.5 bg-primary rounded-full animate-pulse"></span>
               AI 正在生成中...
             </div>
-            <!-- 免费用户剩余次数提示 -->
-            <div v-if="quotaInfo && quotaInfo.remaining >= 0 && !loading" class="mt-4 p-3 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-between">
-              <span class="text-sm text-blue-700">
-                今日剩余 AI 总结次数：<strong>{{ quotaInfo.remaining }}</strong> / {{ quotaInfo.limit }}
-              </span>
-              <button v-if="quotaInfo.remaining <= 1" @click="emit('need-vip')" class="text-xs font-medium text-primary hover:underline cursor-pointer">
-                升级 VIP 无限使用
-              </button>
-            </div>
           </div>
 
           <!-- 字幕文本 Tab -->
@@ -282,9 +273,8 @@ import { summarizeVideo, chatWithVideo } from '../api/summarize.js'
 const props = defineProps({
   videoUrl: { type: String, required: true },
   videoTitle: { type: String, default: '' },
-  user: { type: Object, default: null },
 })
-const emit = defineEmits(['loading-change', 'need-login', 'need-vip'])
+const emit = defineEmits(['loading-change'])
 
 const tabs = [
   { key: 'summary', label: '总结摘要', icon: '📝' },
@@ -644,13 +634,10 @@ function handleClickOutside(e) {
   }
 }
 
-const quotaInfo = ref(null)
-
 async function startSummarize() {
   loading.value = true
   summaryText.value = ''
   mindmapMarkdown.value = ''
-  quotaInfo.value = null
   loadingMessage.value = '正在提取视频字幕...'
 
   try {
@@ -672,9 +659,6 @@ async function startSummarize() {
           mindmapMarkdown.value = parsed.markdown || ''
         } catch (e) { /* ignore parse error */ }
       },
-      quota: (data) => {
-        try { quotaInfo.value = JSON.parse(data) } catch {}
-      },
       done: () => {
         loading.value = false
       },
@@ -682,14 +666,6 @@ async function startSummarize() {
         loading.value = false
         try {
           const parsed = JSON.parse(data)
-          if (parsed.need_login) {
-            emit('need-login')
-            return
-          }
-          if (parsed.need_vip) {
-            emit('need-vip')
-            return
-          }
           alert(parsed.message || '总结失败')
         } catch (e) {
           alert('总结失败: ' + data)

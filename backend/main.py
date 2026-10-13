@@ -14,7 +14,6 @@ from pydantic import BaseModel
 
 from downloader import VideoDownloader
 from douyin import DouyinParser, is_douyin_url
-from database import init_db
 
 
 downloader = VideoDownloader()
@@ -23,7 +22,6 @@ douyin_parser = DouyinParser(download_dir=downloader.DOWNLOAD_DIR)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
     yield
     download_dir = downloader.DOWNLOAD_DIR
     if os.path.exists(download_dir):
@@ -148,12 +146,8 @@ async def proxy_thumbnail(url: str = Query(..., description="缩略图URL")):
 
 # 挂载功能模块路由
 from api_summarize import router as summarize_router
-from api_auth import router as auth_router
-from api_payment import router as payment_router
 
 app.include_router(summarize_router)
-app.include_router(auth_router)
-app.include_router(payment_router)
 
 
 if __name__ == "__main__":
