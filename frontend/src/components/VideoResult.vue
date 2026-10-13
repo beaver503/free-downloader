@@ -100,7 +100,45 @@
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
               d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
           </svg>
-          {{ downloading ? '下载中，请稍候...' : '立即下载' }}
+          {{ downloadButtonLabel }}
+        </button>
+        <!-- 下载进度条 -->
+        <div v-if="showProgress" class="px-1">
+          <div class="flex items-center justify-between text-xs mb-1.5">
+            <span class="font-medium" :class="isFinished ? 'text-success' : 'text-text-secondary'">
+              {{ statusLabel }}
+            </span>
+            <span v-if="percentText" class="font-semibold tabular-nums" :class="isFinished ? 'text-success' : 'text-primary'">
+              {{ percentText }}
+            </span>
+          </div>
+          <div class="h-2.5 rounded-full bg-gray-100 overflow-hidden">
+            <div
+              v-if="isIndeterminate"
+              class="progress-indeterminate h-full w-1/3 rounded-full bg-gradient-to-r from-primary/40 via-primary to-primary/40"
+            ></div>
+            <div
+              v-else
+              class="h-full rounded-full transition-all duration-300"
+              :class="isFinished ? 'bg-success' : 'bg-gradient-to-r from-primary to-primary-dark'"
+              :style="{ width: barWidth }"
+            ></div>
+          </div>
+          <div v-if="!isFinished && detailText" class="flex items-center gap-3 text-[11px] text-text-muted mt-1.5 tabular-nums">
+            <span>{{ detailText }}</span>
+          </div>
+        </div>
+        <!-- 下载音频按钮 -->
+        <button
+          @click="$emit('download-audio')"
+          :disabled="downloading"
+          class="w-full inline-flex items-center justify-center gap-2 h-12 px-8 rounded-full border-2 border-gray-200 text-text-secondary hover:border-primary hover:text-primary font-medium text-base transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
+          </svg>
+          下载音频
         </button>
         <!-- AI 总结按钮（重新总结） -->
         <button
@@ -133,8 +171,9 @@ const props = defineProps({
   video: { type: Object, required: true },
   downloading: Boolean,
   summarizing: Boolean,
+  progress: { type: Object, default: null },
 })
-defineEmits(['download', 'summarize'])
+defineEmits(['download', 'download-audio', 'summarize'])
 
 const thumbnailUrl = computed(() => {
   if (!props.video.thumbnail) return ''
@@ -156,4 +195,75 @@ function formatViewCount(count) {
   if (count >= 10000) return (count / 10000).toFixed(1) + '万'
   return count.toLocaleString()
 }
+
+// ===== 下载进度条 =====
+const isFinished = computed(() => props.progress?.status === 'finished')
+const showProgress = computed(() => props.downloading || isFinished.value)
+const percent = computed(() => props.progress?.percent ?? null)
+const isIndeterminate = computed(() => props.downloading && percent.value == null)
+const barWidth = computed(() => {
+  if (percent.value == null) return '0%'
+  return `${Math.min(percent.value, 100)}%`
+})
+
+const statusLabel = computed(() => {
+  if (isFinished.value) return '下载完成'
+  switch (props.progress?.status) {
+    case 'downloading': return '正在下载'
+    case 'processing': return '正在处理（合并音视频 / 转码）…'
+    case 'error': return '下载失败'
+    default: return '正在准备下载…'
+  }
+})
+
+const percentText = computed(() =>
+  percent.value == null ? '' : `${Math.min(Math.floor(percent.value), 100)}%`
+)
+
+const downloadButtonLabel = computed(() => {
+  if (!props.downloading) return '立即下载'
+  return percentText.value ? `下载中 ${percentText.value}` : '下载中，请稍候...'
+})
+
+const detailText = computed(() => {
+  const p = props.progress
+  if (!p) return ''
+  const parts = []
+  const size = p.total
+    ? `${fmtBytes(p.downloaded)} / ${fmtBytes(p.total)}`
+    : fmtBytes(p.downloaded)
+  if (size) parts.push(size)
+  if (p.speed) parts.push(fmtBytes(p.speed) + '/s')
+  if (p.eta) parts.push('剩余 ' + fmtEta(p.eta))
+  return parts.join(' · ')
+})
+
+function fmtBytes(bytes) {
+  if (!bytes || bytes <= 0) return ''
+  const units = ['B', 'KB', 'MB', 'GB']
+  let v = bytes
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i++
+  }
+  return `${v.toFixed(i === 0 || v >= 100 ? 0 : 1)} ${units[i]}`
+}
+
+function fmtEta(seconds) {
+  const s = Math.max(1, Math.round(seconds))
+  if (s < 60) return `${s} 秒`
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
 </script>
+
+<style scoped>
+/* 总大小未知时进度条来回滑动示意 */
+.progress-indeterminate {
+  animation: progress-slide 1.4s ease-in-out infinite;
+}
+@keyframes progress-slide {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(420%); }
+}
+</style>

@@ -9,6 +9,8 @@ import json
 import hashlib
 import os
 import re
+import shutil
+import subprocess
 import time
 import logging
 from pathlib import Path
@@ -79,8 +81,8 @@ class DouyinParser:
         item_info = self._fetch_item_info(video_id, resolved_url)
         return self._build_result(item_info, video_id)
 
-    def download(self, url: str, mode: str = "video") -> dict:
-        """下载抖音视频，返回文件路径"""
+    def download(self, url: str, mode: str = "video", on_progress=None) -> dict:
+        """下载抖音视频，返回文件路径；on_progress 用于上报下载进度"""
         share_url = self._extract_url(url)
         resolved_url = self._resolve_redirect(share_url)
         video_id = self._extract_video_id(resolved_url)
@@ -97,13 +99,50 @@ class DouyinParser:
         filename = f"{safe_title}{ext}"
         filepath = self.download_dir / filename
 
-        self._download_file(media_url, filepath)
+        self._download_file(media_url, filepath, on_progress=on_progress)
 
         return {
             "filepath": str(filepath),
             "filename": filename,
             "title": title,
             "ext": ext.lstrip("."),
+        }
+
+    def download_audio(self, url: str, on_progress=None) -> dict:
+        """下载视频真实原声并转为 mp3：ffmpeg 抽取音轨，失败时回退音乐轨"""
+        try:
+            from downloader import _find_ffmpeg_path
+            ffmpeg_dir = _find_ffmpeg_path()
+        except Exception:
+            ffmpeg_dir = None
+
+        ffmpeg_bin = shutil.which("ffmpeg", path=ffmpeg_dir) if ffmpeg_dir else None
+        if not ffmpeg_bin:
+            return self.download(url, mode="audio", on_progress=on_progress)
+
+        video_result = self.download(url, mode="video", on_progress=on_progress)
+        video_path = Path(video_result["filepath"])
+        mp3_path = video_path.with_suffix(".mp3")
+
+        if on_progress:
+            on_progress({"status": "processing"})
+
+        try:
+            subprocess.run(
+                [ffmpeg_bin, "-y", "-i", str(video_path), "-vn",
+                 "-acodec", "libmp3lame", "-b:a", "192k", str(mp3_path)],
+                check=True, capture_output=True, timeout=600,
+            )
+        except Exception:
+            return self.download(url, mode="audio")
+
+        video_path.unlink(missing_ok=True)
+
+        return {
+            "filepath": str(mp3_path),
+            "filename": mp3_path.name,
+            "title": video_result["title"],
+            "ext": "mp3",
         }
 
     def _extract_url(self, text: str) -> str:
@@ -362,8 +401,8 @@ class DouyinParser:
         h, m = divmod(m, 60)
         return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
-    def _download_file(self, url: str, filepath: Path, chunk_size: int = 64 * 1024):
-        """下载文件到本地"""
+    def _download_file(self, url: str, filepath: Path, on_progress=None, chunk_size: int = 64 * 1024):
+        """下载文件到本地；on_progress 定期回调 {status, downloaded, total, speed, eta}"""
         for attempt in range(self.max_retries):
             try:
                 resp = self.session.get(
@@ -371,11 +410,38 @@ class DouyinParser:
                 )
                 resp.raise_for_status()
 
+                total = int(resp.headers.get("Content-Length") or 0)
                 temp_path = filepath.with_suffix(filepath.suffix + ".part")
+                downloaded = 0
+                last_bytes, last_ts, last_emit = 0, time.monotonic(), 0.0
                 with temp_path.open("wb") as f:
                     for chunk in resp.iter_content(chunk_size=chunk_size):
-                        if chunk:
-                            f.write(chunk)
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if on_progress:
+                            now = time.monotonic()
+                            # 节流上报（约 0.2s 一次）；结尾补发一次确保到 100%
+                            if now - last_emit >= 0.2 or (total and downloaded >= total):
+                                speed = (downloaded - last_bytes) / max(now - last_ts, 1e-6)
+                                eta = int((total - downloaded) / speed) if total and speed > 0 else 0
+                                on_progress({
+                                    "status": "downloading",
+                                    "downloaded": downloaded,
+                                    "total": total,
+                                    "speed": speed,
+                                    "eta": eta,
+                                })
+                                last_bytes, last_ts, last_emit = downloaded, now, now
+                if on_progress:
+                    on_progress({
+                        "status": "downloading",
+                        "downloaded": downloaded,
+                        "total": total,
+                        "speed": 0,
+                        "eta": 0,
+                    })
                 temp_path.replace(filepath)
                 return
             except Exception as e:

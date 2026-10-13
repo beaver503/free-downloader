@@ -18,7 +18,9 @@
                 :video="videoData"
                 :downloading="downloading"
                 :summarizing="summarizing"
+                :progress="progress"
                 @download="handleDownload"
+                @download-audio="handleDownloadAudio"
                 @summarize="handleSummarize"
               />
             </div>
@@ -54,7 +56,7 @@ import HowToSection from './components/HowToSection.vue'
 import ComparisonSection from './components/ComparisonSection.vue'
 import PlatformSection from './components/PlatformSection.vue'
 import AppFooter from './components/AppFooter.vue'
-import { parseVideo, downloadViaServer } from './api/video.js'
+import { parseVideo, downloadWithProgress, triggerFileDownload } from './api/video.js'
 
 const demoMode = ref(false)
 let enterCount = 0
@@ -85,6 +87,8 @@ const videoData = ref(null)
 const currentUrl = ref('')
 const summaryKey = ref(0)
 const summarizing = ref(false)
+// 下载进度：{ status, percent, downloaded, total, speed, eta, error }
+const progress = ref(null)
 
 function handleSummarize() {
   summaryKey.value++
@@ -97,6 +101,7 @@ function handleSummarizeLoadingChange(isLoading) {
 async function handleParse(url) {
   loading.value = true
   videoData.value = null
+  progress.value = null
   currentUrl.value = url
   try {
     const res = await parseVideo(url)
@@ -114,27 +119,38 @@ async function handleParse(url) {
   }
 }
 
-async function handleDownload(formatId) {
+function cleanErrorMessage(msg) {
+  // 剥离 yt-dlp 错误信息中的 ANSI 终端色码
+  return msg.replace(/\x1b\[[0-9;]*m/g, '')
+}
+
+function handleProgressEvent(p) {
+  progress.value = { ...progress.value, ...p }
+}
+
+async function runDownload(downloadFn) {
   downloading.value = true
+  progress.value = { status: 'starting', percent: null, downloaded: 0, total: 0, speed: 0, eta: 0, error: '' }
   try {
-    const response = await downloadViaServer(currentUrl.value, formatId)
-    const contentDisposition = response.headers['content-disposition']
-    let filename = 'video.mp4'
-    if (contentDisposition) {
-      const match = contentDisposition.match(/filename\*?=(?:UTF-8'')?([^;\n]+)/i)
-      if (match) filename = decodeURIComponent(match[1].replace(/"/g, ''))
-    }
-    const blob = new Blob([response.data])
-    const url = window.URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    a.click()
-    window.URL.revokeObjectURL(url)
+    await downloadFn()
   } catch (err) {
-    alert('下载失败：' + (err.message || '请稍后重试'))
+    alert('下载失败：' + cleanErrorMessage(err.message || '请稍后重试'))
   } finally {
     downloading.value = false
   }
+}
+
+function handleDownload(formatId) {
+  runDownload(() => downloadWithProgress(currentUrl.value, { formatId }, {
+    onProgress: handleProgressEvent,
+    onDone: (data) => triggerFileDownload(data.file_url, data.filename),
+  }))
+}
+
+function handleDownloadAudio() {
+  runDownload(() => downloadWithProgress(currentUrl.value, { audioOnly: true }, {
+    onProgress: handleProgressEvent,
+    onDone: (data) => triggerFileDownload(data.file_url, data.filename),
+  }))
 }
 </script>
